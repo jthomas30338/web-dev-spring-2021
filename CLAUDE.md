@@ -27,3 +27,13 @@ without being asked.
 - Keep experiments runnable/reproducible where possible — future
   sessions (and JT) should be able to open a folder and understand what
   it does without re-deriving context.
+
+## PR process
+
+Open PRs from a feature branch as usual, but **do not merge them
+yourself** — leave every PR for JT to merge, even low-risk
+docs/scaffolding changes in this sandbox. This repo previously had a PR
+merged by Claude with no human review, which an auto-mode classifier
+later flagged after the fact (reason: "Merge Without Review"). Draft PRs
+are fine to leave open indefinitely; don't self-merge to "clean up" a
+stale one.
