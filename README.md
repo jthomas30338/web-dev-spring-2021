@@ -1,27 +1,26 @@
-<h1 align="center"> Vets In Tech </h1>
-<h2 align="center"> April 2021 Cohort Course Repository </h2>
+<h1 align="center">Claude Code Sandbox</h1>
+<h3 align="center">jthomas30338/web-dev-spring-2021</h3>
 
-# Week 1 - HTML5 && CSS3
+This repo started as the course material for the Vets In Tech April 2021
+web dev cohort — that content is preserved in [`archive/`](archive/).
 
-- Git / Git Workflow
-- Basic HTML Elements
-- Intro To CSS
-- Box Model
-- Styling Text
-- CSS Layout
-- Selectors
+It's now repurposed as a **sandbox for exploring what's possible with
+Claude Code**: integrations, connections, workflows, APIs, and other
+things that can be built and automated with it. No production app lives
+here — this is a place to try things, break things, and learn what the
+tooling can do.
 
-# Week 2 - CSS3 && Javascript
+## Layout
 
-- Flexbox
-- CSS Carousel
-- Intro to JS
-- JS DOM Manipulation
-- JS Carousel
+- `archive/` — the original course content (read-only reference)
+- `sandbox/` — where experiments live, organized by what's being tested
+- `CLAUDE.md` — project context and conventions for Claude Code
 
-# Week 3 - Javascript Review && Final Project Prep
+## What we're exploring
 
-- Mockups
-- MVP
+- Code editing & multi-file changes
+- Integrations, connectors, and APIs
+- Workflows and multi-agent orchestration
+- Automation and scheduled tasks (Routines)
 
-# Week 4 - Final Project / Graduation
+See `sandbox/README.md` for the current state of each area.
