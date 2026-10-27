@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Subcontractor Deal Analyzer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com/3.4.16"></script>
+    <script>
+        /* Tokens from GAF-DESIGN.md */
+        tailwind.config = { theme: { extend: {
+            colors: {
+                midnight:'#050814', graphite:'#111827', cloud:'#F7F9FC', sunken:'#EEF1F6',
+                steel:'#D6D6D6', subtle:'#E5E7EB', slate:'#667085',
+                brand:'#004AAD', brandhover:'#003B87', action:'#F76900', actionhover:'#DD5C00',
+                healthy:'#1B9E5A', risk:'#D8324B', actiontint:'#FFF4EC', healthytint:'#E8F6EE', risktint:'#FCEBEE',
+            },
+            fontFamily: {
+                display:['"IBM Plex Sans"','system-ui','sans-serif'],
+                body:['Inter','system-ui','sans-serif'],
+                mono:['"IBM Plex Mono"','ui-monospace','monospace'],
+            },
+            boxShadow: { hair:'0 1px 2px rgba(5,8,20,.06)' },
+        } } };
+    </script>
+    <script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <style>
+        /* Solid status fills, no gradients (GAF guardrail) */
+        .verdict-good    { background:#1B9E5A; color:#fff; }
+        .verdict-caution { background:#F76900; color:#fff; }
+        .verdict-bad     { background:#D8324B; color:#fff; }
+        .verdict-disaster{ background:#050814; color:#fff; }
+        .drop-zone { border:2px dashed #D6D6D6; border-radius:8px; background:#fff; transition:border-color .2s ease-out,background .2s ease-out; }
+        .drop-zone.drag-over { border-color:#004AAD; background:rgba(0,74,173,.05); }
+        .kicker { font-size:12px; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:#F76900; }
+        .divider { width:48px; height:3px; background:#F76900; border-radius:2px; }
+        input[type=number], td.text-right { font-variant-numeric: tabular-nums; }
+        input:focus { outline:2px solid #004AAD; outline-offset:1px; }
+        @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+    </style>
+</head>
+<body class="bg-cloud min-h-screen text-graphite font-body">
+<div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+const STORAGE_KEY = 'sda_state_v2';
+
+/* ── column name aliases (case-insensitive fuzzy match) ── */
+const ALIASES = {
+    name:          ['property','property name','account','account name','name','location','site'],
+    monthlyPay:    ['monthly pay','pay','monthly payment','contract pay','payment','revenue','monthly revenue','amount'],
+    contractHours: ['contract hrs','contract hours','contracted hours','contracted hrs','hrs/mo','hours/mo','hrs per month','hours per month','budgeted hours','budgeted hrs'],
+    actualHours:   ['actual hrs','actual hours','real hours','real hrs','avg hrs','average hours','average hrs','worked hours','worked hrs'],
+    isProposed:    ['proposed','proposed?','new','new account','new?','status','type'],
+};
+
+function matchCol(header) {
+    const h = header.toLowerCase().trim();
+    if (!h) return null;                       /* blank header cells match nothing */
+    for (const [field, variants] of Object.entries(ALIASES)) {
+        if (variants.some(v => h === v || h.includes(v) || v.includes(h))) return field;
+    }
+    return null;
+}
+
+function parseBool(v) {
+    if (typeof v === 'boolean') return v;
+    const s = String(v).toLowerCase().trim();
+    return ['yes','y','true','1','proposed','new','x'].includes(s);
+}
+
+function parseSheet(wb, fileName) {
+    const sheetName = wb.SheetNames[0];
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header:1, defval:'' });
+    if (!rows.length) throw new Error('Sheet appears empty.');
+
+    /* find header row — first row with 2+ non-empty cells */
+    let hdrIdx = 0;
+    for (let i = 0; i < Math.min(10, rows.length); i++) {
+        if (rows[i].filter(c => String(c).trim()).length >= 2) { hdrIdx = i; break; }
+    }
+    const headers = rows[hdrIdx].map(h => String(h));
+    const colMap = {};
+    headers.forEach((h, i) => { const f = matchCol(h); if (f && !(f in colMap)) colMap[f] = i; });  /* first match wins */
+
+    if (!('monthlyPay' in colMap) && !('name' in colMap)) {
+        throw new Error('Could not find required columns. Please check the template format.');
+    }
+
+    const accounts = [];
+    for (let r = hdrIdx + 1; r < rows.length; r++) {
+        const row = rows[r];
+        const name = colMap.name != null ? String(row[colMap.name] ?? '').trim() : '';
+        const pay  = colMap.monthlyPay != null ? String(row[colMap.monthlyPay] ?? '').replace(/[$,\s]/g,'') : '';
+        if (!pay && !name) continue;               /* skip blank rows */
+        accounts.push({
+            id: Date.now() + r + Math.random(),
+            name,
+            monthlyPay:    pay,
+            contractHours: colMap.contractHours != null ? String(row[colMap.contractHours] ?? '').replace(/[,\s]/g,'') : '',
+            actualHours:   colMap.actualHours   != null ? String(row[colMap.actualHours]   ?? '').replace(/[,\s]/g,'') : '',
+            isProposed:    colMap.isProposed     != null ? parseBool(row[colMap.isProposed]) : true,
+        });
+    }
+    if (!accounts.length) throw new Error('No data rows found after the header.');
+    return accounts;
+}
+
+function downloadTemplate() {
+    const rows = [
+        ['Property Name','Monthly Pay','Contract Hrs','Actual Hrs','Proposed?'],
+        ['Example Property A', 2000, 108, 108, 'No'],
+        ['Example Property B', 3900, 260, 299, 'Yes'],
+        ['Example Property C', 4400, 303, 309, 'Yes'],
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{wch:22},{wch:14},{wch:14},{wch:12},{wch:12}];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Accounts');
+    XLSX.writeFile(wb, 'deal-analyzer-template.xlsx');
+}
+
+function loadState() {
+    try { const r = localStorage.getItem(STORAGE_KEY); if (r) return JSON.parse(r); } catch(e){}
+    return null;
+}
+
+/* ─────────────────────────────── APP ─────────────────────────────── */
+function App() {
+    const [saved] = useState(loadState);       /* read localStorage once, not every render */
+    const [accounts, setAccounts] = useState(
+        saved?.accounts?.length ? saved.accounts
+        : [{ id:1, name:'', monthlyPay:'', contractHours:'', actualHours:'', isProposed:true }]
+    );
+    const [laborRate,      setLaborRate]      = useState(saved?.laborRate      ?? 15);
+    const [w2Multiplier,   setW2Multiplier]   = useState(saved?.w2Multiplier   ?? 1.25);
+    const [monthlyOverhead,setMonthlyOverhead]= useState(saved?.monthlyOverhead ?? 500);
+    const [ownerSalary,    setOwnerSalary]    = useState(saved?.ownerSalary    ?? 0);
+    const [goodThreshold,  setGoodThreshold]  = useState(saved?.goodThreshold  ?? 40);
+    const [showAdvanced,   setShowAdvanced]   = useState(false);
+    const [uploadStatus,   setUploadStatus]   = useState(null); /* {type:'success'|'error', msg} */
+    const [dragOver,       setDragOver]       = useState(false);
+    const fileRef = useRef();
+
+    useEffect(() => {
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify({accounts,laborRate,w2Multiplier,monthlyOverhead,ownerSalary,goodThreshold})); }
+        catch(e){}
+    }, [accounts,laborRate,w2Multiplier,monthlyOverhead,ownerSalary,goodThreshold]);
+
+    /* ── file processing ── */
+    function processFile(file) {
+        if (!file) return;
+        const ext = file.name.split('.').pop().toLowerCase();
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                let wb;
+                if (ext === 'csv') {
+                    wb = XLSX.read(e.target.result, { type:'string' });
+                } else {
+                    wb = XLSX.read(new Uint8Array(e.target.result), { type:'array' });
+                }
+                const parsed = parseSheet(wb, file.name);
+                setAccounts(parsed);
+                setUploadStatus({ type:'success', msg:`Loaded ${parsed.length} account${parsed.length!==1?'s':''} from "${file.name}"` });
+            } catch(err) {
+                setUploadStatus({ type:'error', msg: err.message || 'Could not parse file.' });
+            }
+        };
+        if (ext === 'csv') { reader.readAsText(file); }
+        else               { reader.readAsArrayBuffer(file); }
+    }
+
+    function onFileChange(e) { processFile(e.target.files[0]); e.target.value=''; }
+    function onDrop(e) {
+        e.preventDefault(); setDragOver(false);
+        processFile(e.dataTransfer.files[0]);
+    }
+
+    /* ── account CRUD ── */
+    const addAccount    = () => setAccounts([...accounts, { id:Date.now()+Math.random(), name:'', monthlyPay:'', contractHours:'', actualHours:'', isProposed:true }]);
+    const removeAccount = (id) => { if (accounts.length>1) setAccounts(accounts.filter(a=>a.id!==id)); };
+    const updateAccount = (id,field,value) => setAccounts(accounts.map(a=>a.id===id?{...a,[field]:value}:a));
+    const resetAll      = () => {
+        if (confirm('Clear all accounts and saved data?')) {
+            setAccounts([{id:Date.now(),name:'',monthlyPay:'',contractHours:'',actualHours:'',isProposed:true}]);
+            setUploadStatus(null);
+            try { localStorage.removeItem(STORAGE_KEY); } catch(e){}
+        }
+    };
+
+    /* ── calculations ── */
+    const effectiveRate = laborRate * w2Multiplier;
+    const calc = (a) => {
+        const pay         = parseFloat(a.monthlyPay)    || 0;
+        const contractHrs = parseFloat(a.contractHours) || 0;
+        const hasActual   = a.actualHours !== '' && a.actualHours != null;
+        const actualHrs   = hasActual ? (parseFloat(a.actualHours)||0) : contractHrs;
+        const laborCost   = actualHrs * effectiveRate;
+        const margin      = pay - laborCost;
+        const marginPct   = pay>0 ? margin/pay*100 : 0;
+        const hoursVariance = contractHrs>0 ? (actualHrs-contractHrs)/contractHrs*100 : 0;
+        return {...a, pay, contractHrs, actualHrs, hasActual, laborCost, margin, marginPct, hoursVariance};
+    };
+    const calcAll         = accounts.map(calc);
+    const valid           = calcAll.filter(a=>a.pay>0);
+    const currentAccounts = valid.filter(a=>!a.isProposed);
+    const proposedAccounts= valid.filter(a=>a.isProposed);
+    const sumBy           = (arr,f) => arr.reduce((s,a)=>s+f(a),0);
+    const totalLaborHours = sumBy(valid,a=>a.actualHrs)||0;
+    const overheadPerHour = totalLaborHours>0 ? monthlyOverhead/totalLaborHours : 0;
+    const totals = (arr) => {
+        const revenue=sumBy(arr,a=>a.pay), labor=sumBy(arr,a=>a.laborCost), hours=sumBy(arr,a=>a.actualHrs);
+        const gross=revenue-labor, grossPct=revenue>0?gross/revenue*100:0;
+        const ohShare=hours*overheadPerHour;
+        return {revenue,labor,hours,gross,grossPct,ohShare,net:gross-ohShare};
+    };
+    const currentTotals  = totals(currentAccounts);
+    const proposedTotals = totals(proposedAccounts);
+    const combined       = totals(valid);
+    const combinedNet    = combined.gross - monthlyOverhead - ownerSalary;
+    const blendedPct     = combined.revenue>0 ? combined.gross/combined.revenue*100 : 0;
+
+    /* ── margin zone classifier ── */
+    const marginZone = (pct) => {
+        if (pct >= 40) return { label:'Thriving',    color:'text-healthy',  bg:'bg-green-900/30',  border:'border-green-700/50',  desc:'Strong enough to grow, hire, and absorb losses.' };
+        if (pct >= 30) return { label:'Sustainable', color:'text-brand',   bg:'bg-blue-900/30',   border:'border-blue-700/50',   desc:'Covers costs and pays you, but leaves little room to grow.' };
+        if (pct >= 20) return { label:'Fragile',     color:'text-action', bg:'bg-white shadow-hair', border:'border-action', desc:'One bad month or lost account could put you under.' };
+        if (pct >= 0)  return { label:'Danger',      color:'text-action', bg:'bg-orange-900/30', border:'border-orange-700/50', desc:'Not covering true costs. Adjust pricing or scope immediately.' };
+        return             { label:'Losing Money', color:'text-risk',    bg:'bg-red-900/30',    border:'border-red-700/50',    desc:'Labor costs exceed revenue. This deal is destroying value.' };
+    };
+
+    /* ── hours variance classifier ── */
+    const hoursWarnings = (judged) => {
+        const warnings = [];
+        judged.forEach(a => {
+            if (a.contractHrs > 0 && a.hoursVariance > 50)
+                warnings.push({ level:'critical', name: a.name||'Unnamed', pct: a.hoursVariance.toFixed(0),
+                    msg: `running ${a.hoursVariance.toFixed(0)}% over contracted hours — repricing is urgent` });
+            else if (a.contractHrs > 0 && a.hoursVariance > 20)
+                warnings.push({ level:'warn', name: a.name||'Unnamed', pct: a.hoursVariance.toFixed(0),
+                    msg: `running ${a.hoursVariance.toFixed(0)}% over contracted hours — monitor closely` });
+        });
+        return warnings;
+    };
+
+    /* ── growth readiness ── */
+    const growthReadiness = (grossPct, netAfterOwner) => {
+        if (grossPct >= 40 && netAfterOwner > 0)
+            return { label:'Ready to Grow', color:'text-healthy', desc:'Margin supports adding staff, marketing, and new accounts.' };
+        if (grossPct >= 30)
+            return { label:'Stable, Not Yet Scalable', color:'text-brand', desc:'Cover costs first. Build a 3-month cash reserve before adding overhead.' };
+        if (grossPct >= 20)
+            return { label:'Fix Before Growing', color:'text-action', desc:'Expanding now adds risk. Reprice 1–2 accounts before taking on more.' };
+        return { label:'Stop and Reassess', color:'text-risk', desc:'Adding accounts at this margin accelerates losses. Pricing restructure needed first.' };
+    };
+
+    /* ── verdict ── */
+    const getVerdict = () => {
+        if (!valid.length) return { type:'none', title:'Enter a deal', message:'Add at least one account with a monthly pay amount.' };
+
+        const hasP   = proposedAccounts.length > 0;
+        const judged = hasP ? proposedAccounts : valid;
+        const j      = hasP ? proposedTotals : combined;
+        const zone   = marginZone(j.grossPct);
+        const hrsWarn= hoursWarnings(judged);
+        const growth = growthReadiness(blendedPct, combinedNet);
+
+        const findings = [];   // what's true right now
+        const actions  = [];   // what to do about it
+        let score = 0;
+
+        /* ── margin scoring ── */
+        if (j.grossPct >= 40) {
+            score += 2;
+            findings.push(`${j.grossPct.toFixed(0)}% gross margin — in the Thriving zone (40%+ target)`);
+        } else if (j.grossPct >= 30) {
+            score += 1;
+            findings.push(`${j.grossPct.toFixed(0)}% gross margin — Sustainable but below the 40% growth target`);
+            actions.push(`Price new accounts at 40%+ to build toward a growth margin`);
+        } else if (j.grossPct >= 20) {
+            score -= 1;
+            findings.push(`${j.grossPct.toFixed(0)}% gross margin — Fragile zone (20–30%)`);
+            actions.push(`Renegotiate rate or reduce scope to reach 30%+ before expanding`);
+            actions.push(`Do not add overhead (staff, equipment) until margin improves`);
+        } else if (j.grossPct >= 0) {
+            score -= 2;
+            findings.push(`${j.grossPct.toFixed(0)}% gross margin — Danger zone. True costs are barely covered`);
+            actions.push(`Reprice this account immediately — target a minimum 20% rate increase`);
+            actions.push(`Audit actual hours vs. contracted hours on every account this month`);
+        } else if (j.grossPct >= -20) {
+            score -= 3;
+            findings.push(`Losing ${Math.abs(j.grossPct).toFixed(0)}% — labor costs exceed revenue before overhead`);
+            actions.push(`Do not sign or renew this contract at current terms`);
+            actions.push(`Calculate what rate achieves 35% margin and present a repricing proposal`);
+        } else {
+            score -= 4;
+            findings.push(`Losing ${Math.abs(j.grossPct).toFixed(0)}% — catastrophic. Every hour worked deepens the loss`);
+            actions.push(`Exit or restructure this deal immediately`);
+        }
+
+        /* ── hours variance — standalone warnings (Brandon/Sandra trap) ── */
+        hrsWarn.forEach(w => {
+            if (w.level === 'critical') {
+                score -= 2;
+                findings.push(`"${w.name}" is ${w.msg}`);
+                actions.push(`"${w.name}": Track actual hours for 30 days, then reprice based on real scope — not what was originally sold`);
+            } else {
+                score -= 1;
+                findings.push(`"${w.name}" is ${w.msg}`);
+                actions.push(`"${w.name}": Document actual hours and flag for repricing at next renewal`);
+            }
+        });
+
+        /* ── net after overhead share ── */
+        if (j.net < 0) {
+            score -= 2;
+            findings.push(`After its fair overhead share, this loses $${Math.abs(j.net).toFixed(0)}/mo net`);
+            actions.push(`Overhead allocation is $${overheadPerHour.toFixed(2)}/hr — factor this into any repricing conversation`);
+        } else {
+            findings.push(`Covers overhead share and leaves $${j.net.toFixed(0)}/mo net`);
+        }
+
+        /* ── owner compensation reality check ── */
+        if (ownerSalary > 0 && combinedNet < ownerSalary * 0.5) {
+            score -= 1;
+            findings.push(`Combined net ($${Math.round(combinedNet).toLocaleString()}/mo) won't support your $${Math.round(ownerSalary).toLocaleString()}/mo salary goal`);
+            actions.push(`Owner salary should be the first line in your budget, not what's left over — price accordingly`);
+        }
+
+        /* ── book-comparison impact ── */
+        if (hasP && currentAccounts.length > 0) {
+            const drop = currentTotals.grossPct - blendedPct;
+            if (drop > 15) {
+                score -= 2;
+                findings.push(`Taking this deal drops your blended margin from ${currentTotals.grossPct.toFixed(0)}% to ${blendedPct.toFixed(0)}%`);
+                actions.push(`Your current book is healthier than this deal — protect it. Only add accounts that improve or match your current margin`);
+            } else if (drop > 5) {
+                score -= 1;
+                findings.push(`Blended margin dips ${drop.toFixed(0)} points if you accept (${currentTotals.grossPct.toFixed(0)}% → ${blendedPct.toFixed(0)}%)`);
+                actions.push(`Acceptable only if this account has growth potential — set a 90-day margin review`);
+            } else if (drop < 0) {
+                score += 1;
+                findings.push(`This deal raises your blended margin to ${blendedPct.toFixed(0)}% — a portfolio improvement`);
+            }
+        }
+
+        /* ── verdict ── */
+        const base = score >= 2 ? 'good' : score >= 0 ? 'caution' : score >= -3 ? 'bad' : 'disaster';
+        const titles = {
+            good:    '✅ Good Deal',
+            caution: '⚠️ Proceed With Caution',
+            bad:     '❌ Bad Deal',
+            disaster:'🚨 Walk Away',
+        };
+        const messages = {
+            good:    `The numbers work. At ${j.grossPct.toFixed(0)}% gross margin you're in the Thriving zone — this deal builds your business.`,
+            caution: `The deal is marginal. Review the actions below before signing — small adjustments now prevent big problems later.`,
+            bad:     `The numbers don't support this deal as structured. Use the actions below to understand what it would take to make it work.`,
+            disaster:`Taking this deal would actively harm your business. The math isn't close — walk away or require a complete restructure.`,
+        };
+
+        return { type: base, title: titles[base], message: messages[base], findings, actions, zone, growth, hrsWarn };
+    };
+    const verdict = getVerdict();
+    const money = (n) => `${n<0?'-':''}$${Math.abs(Math.round(n)).toLocaleString()}`;
+
+    /* ─────────────── RENDER ─────────────── */
+    return (
+        <div className="max-w-6xl mx-auto p-6">
+
+            {/* Header */}
+            <div className="bg-brand rounded-lg px-6 py-10 mb-8 text-center flex flex-col items-center">
+                <div className="kicker mb-3">Get AI-Fluent</div>
+                <h1 className="font-display text-4xl font-bold text-white mb-3">Subcontractor Deal Analyzer</h1>
+                <div className="divider mb-3"></div>
+                <p className="text-cloud/90">Know if a deal is profitable before you sign.</p>
+            </div>
+
+            {/* Labor Cost Settings */}
+            <div className="bg-white border border-subtle shadow-hair rounded-lg p-4 mb-6">
+                <div className="flex justify-between items-center mb-4">
+                    <h2 className="font-display text-lg font-semibold">Labor Cost Settings</h2>
+                    <button onClick={()=>setShowAdvanced(!showAdvanced)} className="text-brand text-sm hover:underline">
+                        {showAdvanced?'Hide':'Show'} Advanced
+                    </button>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div>
+                        <label className="block text-sm text-slate mb-1">Base Hourly Wage</label>
+                        <div className="flex items-center"><span className="text-slate mr-1">$</span>
+                            <input type="number" value={laborRate} onChange={e=>setLaborRate(parseFloat(e.target.value)||0)} className="w-full bg-white border border-steel rounded px-3 py-2" step="0.50"/>
+                        </div>
+                    </div>
+                    <div>
+                        <label className="block text-sm text-slate mb-1">W-2 Multiplier</label>
+                        <input type="number" value={w2Multiplier} onChange={e=>setW2Multiplier(parseFloat(e.target.value)||1)} className="w-full bg-white border border-steel rounded px-3 py-2" step="0.05"/>
+                        <p className="text-xs text-slate mt-1">Effective: ${effectiveRate.toFixed(2)}/hr</p>
+                    </div>
+                    {showAdvanced && (<>
+                        <div>
+                            <label className="block text-sm text-slate mb-1">Monthly Overhead</label>
+                            <div className="flex items-center"><span className="text-slate mr-1">$</span>
+                                <input type="number" value={monthlyOverhead} onChange={e=>setMonthlyOverhead(parseFloat(e.target.value)||0)} className="w-full bg-white border border-steel rounded px-3 py-2"/>
+                            </div>
+                            <p className="text-xs text-slate mt-1">Allocated: ${overheadPerHour.toFixed(2)}/hr</p>
+                        </div>
+                        <div>
+                            <label className="block text-sm text-slate mb-1">Owner Salary Goal</label>
+                            <div className="flex items-center"><span className="text-slate mr-1">$</span>
+                                <input type="number" value={ownerSalary} onChange={e=>setOwnerSalary(parseFloat(e.target.value)||0)} className="w-full bg-white border border-steel rounded px-3 py-2"/>
+                            </div>
+                        </div>
+                        <div>
+                            <label className="block text-sm text-slate mb-1">Target Margin (default 40%)</label>
+                            <div className="flex items-center">
+                                <input type="number" value={goodThreshold} onChange={e=>setGoodThreshold(parseFloat(e.target.value)||0)} className="w-full bg-white border border-steel rounded px-3 py-2"/>
+                                <span className="text-slate ml-1">%</span>
+                            </div>
+                        </div>
+                    </>)}
+                </div>
+            </div>
+
+            {/* Upload Zone */}
+            <div className="bg-white border border-subtle shadow-hair rounded-lg p-4 mb-6">
+                <div className="flex justify-between items-center mb-3">
+                    <h2 className="font-display text-lg font-semibold">Upload Spreadsheet</h2>
+                    <button onClick={downloadTemplate}
+                        className="flex items-center gap-2 text-sm bg-white border border-steel hover:bg-sunken px-3 py-2 rounded transition-colors">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3M3 17V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>
+                        </svg>
+                        Download Template
+                    </button>
+                </div>
+
+                <div
+                    className={`drop-zone p-8 text-center cursor-pointer ${dragOver?'drag-over':''}`}
+                    onClick={()=>fileRef.current.click()}
+                    onDragOver={e=>{e.preventDefault();setDragOver(true);}}
+                    onDragLeave={()=>setDragOver(false)}
+                    onDrop={onDrop}
+                >
+                    <svg className="w-10 h-10 mx-auto mb-3 text-slate" fill="none" stroke="currentColor" strokeWidth="1.5" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+                    </svg>
+                    <p className="text-graphite font-medium mb-1">Drop your spreadsheet here, or click to browse</p>
+                    <p className="text-slate text-sm">Accepts .xlsx, .xls, .csv — auto-detects columns</p>
+                    <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={onFileChange}/>
+                </div>
+
+                {uploadStatus && (
+                    <div className={`mt-3 px-4 py-3 rounded-lg text-sm flex items-start gap-2 ${
+                        uploadStatus.type==='success' ? 'bg-healthytint text-healthy border border-healthy'
+                                                      : 'bg-risktint text-risk border border-risk'
+                    }`}>
+                        <span className="mt-0.5">{uploadStatus.type==='success'?'✓':'✗'}</span>
+                        <span>{uploadStatus.msg}</span>
+                        {uploadStatus.type==='error' && (
+                            <span className="ml-auto text-xs opacity-70 cursor-pointer hover:opacity-100 whitespace-nowrap"
+                                onClick={()=>setUploadStatus(null)}>dismiss</span>
+                        )}
+                    </div>
+                )}
+
+                <p className="text-xs text-slate mt-3">
+                    Expected columns: <span className="text-slate">Property Name · Monthly Pay · Contract Hrs · Actual Hrs · Proposed? (Yes/No)</span>
+                    <br/>Column names are flexible — download the template to see exact format. Upload replaces the current table.
+                </p>
+            </div>
+
+            {/* Accounts Table */}
+            <div className="bg-white border border-subtle shadow-hair rounded-lg p-4 mb-6">
+                <div className="flex justify-between items-center mb-2">
+                    <h2 className="font-display text-lg font-semibold">Accounts <span className="text-slate text-sm font-normal ml-1">({valid.length} with data)</span></h2>
+                    <div className="flex gap-2">
+                        <button onClick={resetAll} className="bg-white border border-steel hover:bg-sunken px-3 py-2 rounded text-sm transition-colors">Reset</button>
+                        <button onClick={addAccount} className="bg-action hover:bg-actionhover text-white px-4 py-2 rounded text-sm font-medium transition-colors">+ Add Account</button>
+                    </div>
+                </div>
+                <p className="text-xs text-slate mb-3">
+                    Check <span className="text-action">Proposed?</span> for accounts being offered to you. Leave unchecked for accounts you already run.
+                    Leave Actual Hrs blank to use Contract Hrs.
+                </p>
+                <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                        <thead>
+                            <tr className="text-slate border-b border-subtle">
+                                <th className="text-left py-2 px-2">Property Name</th>
+                                <th className="text-left py-2 px-2">Monthly Pay</th>
+                                <th className="text-left py-2 px-2">Contract Hrs</th>
+                                <th className="text-left py-2 px-2">Actual Hrs</th>
+                                <th className="text-center py-2 px-2">Proposed?</th>
+                                <th className="text-right py-2 px-2">Labor Cost</th>
+                                <th className="text-right py-2 px-2">Margin</th>
+                                <th className="text-right py-2 px-2">%</th>
+                                <th className="py-2 px-2"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {calcAll.map(a=>(
+                                <tr key={a.id} className={`border-b border-subtle ${a.isProposed?'bg-actiontint':''}`}>
+                                    <td className="py-2 px-2">
+                                        <input type="text" value={a.name} onChange={e=>updateAccount(a.id,'name',e.target.value)}
+                                            placeholder="Account name" className="w-full bg-white border border-steel rounded px-2 py-1"/>
+                                    </td>
+                                    <td className="py-2 px-2">
+                                        <input type="number" value={a.monthlyPay} onChange={e=>updateAccount(a.id,'monthlyPay',e.target.value)}
+                                            placeholder="$0" className="w-24 bg-white border border-steel rounded px-2 py-1"/>
+                                    </td>
+                                    <td className="py-2 px-2">
+                                        <input type="number" value={a.contractHours} onChange={e=>updateAccount(a.id,'contractHours',e.target.value)}
+                                            placeholder="0" className="w-20 bg-white border border-steel rounded px-2 py-1"/>
+                                    </td>
+                                    <td className="py-2 px-2">
+                                        <input type="number" value={a.actualHours} onChange={e=>updateAccount(a.id,'actualHours',e.target.value)}
+                                            placeholder={a.contractHours||"0"}
+                                            className={`w-20 bg-white border border-steel rounded px-2 py-1 ${!a.hasActual&&a.contractHrs>0?'text-slate':''}`}/>
+                                    </td>
+                                    <td className="py-2 px-2 text-center">
+                                        <input type="checkbox" checked={a.isProposed} onChange={e=>updateAccount(a.id,'isProposed',e.target.checked)} className="w-4 h-4"/>
+                                    </td>
+                                    <td className="py-2 px-2 text-right text-slate">{a.laborCost>0?money(a.laborCost):'—'}</td>
+                                    <td className={`py-2 px-2 text-right font-medium ${a.pay>0?(a.margin<0?'text-risk':'text-healthy'):''}`}>
+                                        {a.pay>0?money(a.margin):'—'}
+                                    </td>
+                                    <td className={`py-2 px-2 text-right ${a.pay>0?(a.marginPct<0?'text-risk':a.marginPct<goodThreshold?'text-action':'text-healthy'):''}`}>
+                                        {a.pay>0?`${a.marginPct.toFixed(0)}%`:'—'}
+                                    </td>
+                                    <td className="py-2 px-2">
+                                        <button onClick={()=>removeAccount(a.id)} className="text-slate hover:text-risk">×</button>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            {/* Verdict */}
+            {verdict.type!=='none' && (
+                <div className="mb-6 space-y-3">
+                    {/* Main verdict banner */}
+                    <div className={`rounded-lg p-6 verdict-${verdict.type}`}>
+                        <div className="flex items-start justify-between gap-4 flex-wrap">
+                            <div>
+                                <h2 className="font-display text-2xl font-bold mb-1">{verdict.title}</h2>
+                                <p className="opacity-90 text-base">{verdict.message}</p>
+                            </div>
+                            {verdict.zone && (
+                                <div className={`shrink-0 px-3 py-1.5 rounded-full text-sm font-semibold bg-black/20 whitespace-nowrap`}>
+                                    {verdict.zone.label}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Findings + Actions side by side */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {/* What the numbers show */}
+                        <div className="bg-white border border-subtle shadow-hair rounded-lg p-4">
+                            <h3 className="text-sm font-semibold text-graphite mb-3 uppercase tracking-wide">What the Numbers Show</h3>
+                            <ul className="space-y-2">
+                                {verdict.findings.map((f,i)=>(
+                                    <li key={i} className="flex items-start gap-2 text-sm text-graphite">
+                                        <span className="mt-0.5 text-slate">→</span><span>{f}</span>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                        {/* What to do about it */}
+                        <div className="bg-white border border-subtle shadow-hair rounded-lg p-4">
+                            <h3 className="text-sm font-semibold text-graphite mb-3 uppercase tracking-wide">
+                                {verdict.actions.length ? 'What To Do About It' : 'You\'re On Track'}
+                            </h3>
+                            {verdict.actions.length ? (
+                                <ul className="space-y-2">
+                                    {verdict.actions.map((a,i)=>(
+                                        <li key={i} className="flex items-start gap-2 text-sm">
+                                            <span className="mt-0.5 text-brand font-bold shrink-0">✓</span>
+                                            <span className="text-graphite">{a}</span>
+                                        </li>
+                                    ))}
+                                </ul>
+                            ) : (
+                                <p className="text-sm text-slate">Margins are healthy and hours are tracking to contract. Keep monitoring actual vs. contracted hours monthly.</p>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Hours variance callout — only if warnings exist */}
+                    {verdict.hrsWarn && verdict.hrsWarn.length > 0 && (
+                        <div className="bg-actiontint border border-action rounded-lg p-4">
+                            <h3 className="text-sm font-semibold text-action mb-2 uppercase tracking-wide">
+                                ⚠ Hours Variance Alert — The Brandon & Sandra Trap
+                            </h3>
+                            <p className="text-xs text-slate mb-3">Contracted hours vs. actual hours is where deals quietly go underwater. These accounts need attention now.</p>
+                            <ul className="space-y-1.5">
+                                {verdict.hrsWarn.map((w,i)=>(
+                                    <li key={i} className={`text-sm flex items-start gap-2 ${w.level==='critical'?'text-risk':'text-graphite'}`}>
+                                        <span className="shrink-0">{w.level==='critical'?'🔴':'🟡'}</span>
+                                        <span><strong>{w.name}</strong> — {w.msg}</span>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+
+                    {/* Growth Readiness */}
+                    {verdict.growth && valid.length > 0 && (
+                        <div className="bg-white border border-subtle shadow-hair rounded-lg p-4 flex items-start gap-4">
+                            <div>
+                                <h3 className="text-sm font-semibold text-slate uppercase tracking-wide mb-1">Growth Readiness</h3>
+                                <p className={`text-base font-semibold ${verdict.growth.color} mb-1`}>{verdict.growth.label}</p>
+                                <p className="text-sm text-slate">{verdict.growth.desc}</p>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Margin zone guide */}
+                    <div className="bg-sunken rounded-lg p-4">
+                        <h3 className="text-xs font-semibold text-slate uppercase tracking-wide mb-3">Margin Zone Reference</h3>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                            {[
+                                {label:'Thriving',    range:'40%+',  color:'text-healthy',  desc:'Grow with confidence'},
+                                {label:'Sustainable', range:'30–40%',color:'text-brand',   desc:'Stable, not yet scalable'},
+                                {label:'Fragile',     range:'20–30%',color:'text-action', desc:'Reprice before expanding'},
+                                {label:'Danger',      range:'<20%',  color:'text-risk',    desc:'Adjust pricing now'},
+                            ].map(z=>(
+                                <div key={z.label} className="text-center">
+                                    <div className={`text-sm font-semibold ${z.color}`}>{z.label}</div>
+                                    <div className="text-xs text-slate">{z.range}</div>
+                                    <div className="text-xs text-slate mt-0.5">{z.desc}</div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Summary Cards */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                <div className="bg-white border border-subtle shadow-hair rounded-lg p-4">
+                    <h3 className="text-sm text-slate mb-3">CURRENT ACCOUNTS</h3>
+                    <div className="space-y-2">
+                        <div className="flex justify-between"><span className="text-slate">Revenue</span><span>{money(currentTotals.revenue)}</span></div>
+                        <div className="flex justify-between"><span className="text-slate">Labor</span><span>{money(currentTotals.labor)}</span></div>
+                        <div className="flex justify-between border-t border-subtle pt-2">
+                            <span className="font-medium">Gross Margin</span>
+                            <span className={currentTotals.gross<0?'text-risk':'text-healthy'}>
+                                {money(currentTotals.gross)} ({currentTotals.grossPct.toFixed(0)}%)
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                <div className="bg-white shadow-hair rounded-lg p-4 border border-action">
+                    <h3 className="text-sm text-action mb-3">PROPOSED ACCOUNTS</h3>
+                    <div className="space-y-2">
+                        <div className="flex justify-between"><span className="text-slate">Revenue</span><span>{money(proposedTotals.revenue)}</span></div>
+                        <div className="flex justify-between"><span className="text-slate">Labor</span><span>{money(proposedTotals.labor)}</span></div>
+                        <div className="flex justify-between"><span className="text-slate">Gross Margin</span>
+                            <span className={proposedTotals.gross<0?'text-risk':'text-healthy'}>{money(proposedTotals.gross)} ({proposedTotals.grossPct.toFixed(0)}%)</span>
+                        </div>
+                        <div className="flex justify-between text-sm border-t border-subtle pt-2"><span className="text-slate">- Overhead share</span><span className="text-slate">{money(proposedTotals.ohShare)}</span></div>
+                        <div className="flex justify-between">
+                            <span className="font-medium">Net</span>
+                            <span className={proposedTotals.net<0?'text-risk font-bold':'text-healthy font-bold'}>{money(proposedTotals.net)}</span>
+                        </div>
+                    </div>
+                </div>
+                <div className="bg-white border border-subtle shadow-hair rounded-lg p-4 border-2 border-brand">
+                    <h3 className="text-sm text-brand mb-3">WHOLE BUSINESS</h3>
+                    <div className="space-y-2">
+                        <div className="flex justify-between"><span className="text-slate">Total Revenue</span><span>{money(combined.revenue)}</span></div>
+                        <div className="flex justify-between"><span className="text-slate">Total Labor</span><span>{money(combined.labor)}</span></div>
+                        <div className="flex justify-between"><span className="text-slate">Gross Margin</span>
+                            <span className={combined.gross<0?'text-risk':'text-healthy'}>{money(combined.gross)} ({blendedPct.toFixed(0)}%)</span>
+                        </div>
+                        <div className="flex justify-between text-sm"><span className="text-slate">- Overhead</span><span className="text-slate">{money(monthlyOverhead)}</span></div>
+                        {ownerSalary>0&&<div className="flex justify-between text-sm"><span className="text-slate">- Owner Salary</span><span className="text-slate">{money(ownerSalary)}</span></div>}
+                        <div className="flex justify-between border-t border-subtle pt-2">
+                            <span className="font-medium">Net Take-Home</span>
+                            <span className={combinedNet<0?'text-risk font-bold':'text-healthy font-bold'}>{money(combinedNet)}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div className="text-center text-slate text-sm">
+                <p>Built by Alternative Programming | Get AI Fluent</p>
+                <p className="mt-2 kicker">Make AI practical.</p>
+            </div>
+        </div>
+    );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
